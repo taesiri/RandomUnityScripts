@@ -2,6 +2,57 @@ using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq; // Required for LINQ operations like Any()
+using System.IO;   // Required for file operations
+using System;      // Required for DateTime
+
+// Define a structure to hold log entry data
+[System.Serializable]
+public struct GlitchLogEntry
+{
+    public string glitchType;
+    public int startFrameNumber;
+    public float startTimestamp;
+    public float durationSeconds;
+    public float endTimestamp;
+    public int endFrameNumber;   // Added end frame
+    public int durationFrames; // Added duration in frames
+
+    public GlitchLogEntry(string type, int startFrame, float startTime, float durationSec, float endTime, int endFrame)
+    {
+        glitchType = type;
+        startFrameNumber = startFrame;
+        startTimestamp = startTime;
+        durationSeconds = durationSec;
+        endTimestamp = endTime;
+        endFrameNumber = endFrame;
+        durationFrames = endFrame - startFrame; // Calculate frame duration
+    }
+
+    // Constructor for permanent glitch (no duration)
+    public GlitchLogEntry(string type, int frame, float time)
+    {
+        glitchType = type;
+        startFrameNumber = frame;
+        startTimestamp = time;
+        durationSeconds = 0f;
+        endTimestamp = time; // End time is same as start
+        endFrameNumber = frame; // End frame is same as start
+        durationFrames = 0;
+    }
+}
+
+// Wrapper class for JsonUtility serialization of the list
+[System.Serializable]
+public class GlitchLogData
+{
+    // Add fields to log the time window configuration
+    public bool isRestrictedToWindow;
+    public float windowStartTime;
+    public float windowEndTime;
+    public float chosenFirstGlitchTime; // The randomly picked time to start glitching
+
+    public List<GlitchLogEntry> entries = new List<GlitchLogEntry>();
+}
 
 public class AdvancedHierarchicalGlitch : MonoBehaviour
 {
@@ -22,7 +73,18 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [SerializeField] private float minTimeBetweenGlitches = 1.0f;
     [Tooltip("Maximum time (seconds) between any glitch events.")]
     [SerializeField] private float maxTimeBetweenGlitches = 5.0f;
-    // Removed global duration - now per-type
+    [Space]
+    [Tooltip("Enforce a single, fixed duration for all momentary glitches, overriding the min/max settings below.")]
+    [SerializeField] private bool enforceFixedDuration = false;
+    [Tooltip("The fixed duration (seconds) to use for momentary glitches when 'Enforce Fixed Duration' is checked.")]
+    [SerializeField] [Min(0.01f)] private float fixedGlitchDuration = 2.0f;
+    [Space]
+    [Tooltip("Restrict glitching activity to only occur within a specific time window?")]
+    [SerializeField] private bool restrictGlitchingToWindow = false;
+    [Tooltip("The earliest time (seconds since game start) that the first glitch can potentially occur.")]
+    [SerializeField] [Min(0f)] private float glitchWindowStartTime = 0f;
+    [Tooltip("The latest time (seconds since game start) by which the first glitch must have been scheduled if the window is active.")]
+    [SerializeField] [Min(0f)] private float glitchWindowEndTime = 50f;
 
     [Header("Momentary: Target Selection")]
     [Tooltip("Chance (0 to 1) that ANY individual glitchable object will be affected during a momentary Blink or Individual Jump glitch event.")]
@@ -34,7 +96,9 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [Header("Momentary: Blink Glitch")]
     [Tooltip("Enable momentary random blinking during glitch events.")]
     [SerializeField] private bool enableBlinkGlitch = true;
+    [Tooltip("Minimum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float minBlinkDuration = 0.1f;
+    [Tooltip("Maximum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float maxBlinkDuration = 0.5f;
     [Tooltip("During a blink glitch, the chance (0 to 1) for an affected Renderer to be VISIBLE each frame.")]
     [Range(0f, 1f)]
@@ -43,7 +107,9 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [Header("Momentary: Individual Transform Jump Glitch")]
     [Tooltip("Enable momentary random position/rotation jumps for individual objects during glitch events.")]
     [SerializeField] private bool enableIndividualTransformJumpGlitch = true;
+    [Tooltip("Minimum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float minIndividualJumpDuration = 0.1f;
+    [Tooltip("Maximum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float maxIndividualJumpDuration = 0.3f;
     [Tooltip("Maximum distance an affected object can jump from its ORIGINAL local position during a glitch.")]
     [SerializeField] private float individualJumpPositionIntensity = 0.5f;
@@ -53,7 +119,9 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [Header("Momentary: Whole Object Jump Glitch")]
     [Tooltip("Enable momentary random position/rotation jumps for the ENTIRE targetRoot during glitch events.")]
     [SerializeField] private bool enableWholeObjectJumpGlitch = true;
+    [Tooltip("Minimum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float minWholeObjectJumpDuration = 0.1f;
+    [Tooltip("Maximum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float maxWholeObjectJumpDuration = 0.4f;
     [Tooltip("Maximum distance the entire targetRoot can jump from its ORIGINAL local position during a glitch.")]
     [SerializeField] private float wholeObjectJumpPositionIntensity = 0.2f;
@@ -63,7 +131,9 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [Header("Momentary: Texture Glitch")]
     [Tooltip("Enable momentarily altering textures on materials during glitch events.")]
     [SerializeField] private bool enableTextureGlitch = true;
+    [Tooltip("Minimum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float minTextureGlitchDuration = 0.2f;
+    [Tooltip("Maximum duration for this glitch type (used if 'Enforce Fixed Duration' is false).")]
     [Min(0.01f)] public float maxTextureGlitchDuration = 0.6f;
     [Space]
     [Tooltip("How the texture glitch affects materials:\n" +
@@ -87,6 +157,16 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     [Range(0f, 1f)]
     [SerializeField] private float disappearanceTargetChance = 0.1f; // Affects only a few targets usually
 
+
+    [Header("Glitch Control")]
+    [Tooltip("Maximum number of glitch events to trigger. Set to 0 or less for infinite glitches.")]
+    [SerializeField] private int maxGlitchEvents = 1;
+
+    [Header("Logging")]
+    [Tooltip("Enable logging of glitch events to a JSON file.")]
+    [SerializeField] private bool enableLogging = false;
+    [Tooltip("Directory relative to Application.persistentDataPath where logs will be saved.")]
+    [SerializeField] private string logDirectory = "GlitchLogs";
 
     // --- Private Variables ---
 
@@ -114,9 +194,18 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     private float timeUntilNextGlitch = 0f;
     private bool isMomentaryGlitchActive = false;
     private float currentGlitchEndTime = 0f;
+    private int currentGlitchCount = 0; // Counter for triggered glitches
+    private float firstGlitchTime = -1f;        // Time the first glitch is scheduled to start (if window is active)
+    private bool waitingForFirstGlitch = false; // Flag indicating if we are waiting for the first glitch time
 
     // --- Current Momentary Glitch Tracking ---
     private System.Type activeMomentaryGlitchType = null; // Track which type is active
+    // Store start info for logging at the end of the glitch
+    private string currentGlitchLogType = "None";
+    private int currentGlitchStartFrame = 0;
+    private float currentGlitchStartTime = 0f;
+    private float currentGlitchDurationSec = 0f;
+    private float currentGlitchScheduledEndTime = 0f; // Use this for consistency
 
     // Store targets affected by the CURRENT specific momentary glitch for proper reset
     private HashSet<Renderer> renderersInCurrentBlink = new HashSet<Renderer>();
@@ -132,6 +221,9 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     private class WholeObjectJumpGlitchState { }
     private class TextureGlitchState { }
 
+    // --- Logging Data ---
+    private GlitchLogData glitchLog = new GlitchLogData();
+    private bool logWritten = false; // Prevent writing multiple times unnecessarily
 
     void Awake()
     {
@@ -144,6 +236,13 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
 
     void OnEnable()
     {
+        // Reset counter and log state if re-enabled
+        currentGlitchCount = 0;
+        glitchLog = new GlitchLogData(); // Reset log data
+        logWritten = false;
+        firstGlitchTime = -1f; // Reset calculated first glitch time
+        waitingForFirstGlitch = false; // Reset waiting state
+
         if (!isSetupComplete)
         {
             InitializeGlitchTargets();
@@ -152,7 +251,39 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         if (isSetupComplete)
         {
             ResetMomentaryGlitches(); // Reset any lingering state from before disable
-            ScheduleNextGlitch();
+
+            // --- Schedule based on window restriction ---
+            if (restrictGlitchingToWindow && glitchWindowEndTime > glitchWindowStartTime)
+            {
+                firstGlitchTime = UnityEngine.Random.Range(glitchWindowStartTime, glitchWindowEndTime);
+                waitingForFirstGlitch = true;
+                timeUntilNextGlitch = float.MaxValue; // Don't schedule normally yet
+
+                // Log window info
+                glitchLog.isRestrictedToWindow = true;
+                glitchLog.windowStartTime = glitchWindowStartTime;
+                glitchLog.windowEndTime = glitchWindowEndTime;
+                glitchLog.chosenFirstGlitchTime = firstGlitchTime;
+
+                Debug.Log($"[{gameObject.name}] Glitching restricted to window [{glitchWindowStartTime:F2}s - {glitchWindowEndTime:F2}s]. First glitch scheduled for ~{firstGlitchTime:F2}s.", this);
+            }
+            else
+            {
+                // Not restricting, or window invalid - schedule normally if allowed
+                glitchLog.isRestrictedToWindow = false; // Log that we are not restricted
+                glitchLog.windowStartTime = -1f;      // Set to -1 because window is not used
+                glitchLog.windowEndTime = -1f;        // Set to -1 because window is not used
+                glitchLog.chosenFirstGlitchTime = -1f; // Set to -1 because no specific first time was chosen
+
+                if (maxGlitchEvents <= 0 || currentGlitchCount < maxGlitchEvents)
+                {
+                    ScheduleNextGlitch();
+                }
+                else
+                {
+                    timeUntilNextGlitch = float.MaxValue; // Max events reached at start
+                }
+            }
         }
     }
 
@@ -276,20 +407,82 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         if(enableWholeObjectJumpGlitch) availableMomentaryGlitches.Add(typeof(WholeObjectJumpGlitchState));
         if(enableTextureGlitch) availableMomentaryGlitches.Add(typeof(TextureGlitchState));
 
+        // Reset glitch counter and log on full initialization
+        currentGlitchCount = 0;
+        glitchLog = new GlitchLogData();
+        logWritten = false;
+
         isSetupComplete = true;
-        Debug.Log($"[{gameObject.name}] AdvancedHierarchicalGlitch Initialized. Found {glitchableRenderers.Count} active renderers in '{targetRoot.name}'. Ready to glitch {availableMomentaryGlitches.Count} momentary types.");
+        Debug.Log($"[{gameObject.name}] AdvancedHierarchicalGlitch Initialized. Found {glitchableRenderers.Count} active renderers in '{targetRoot.name}'. Ready to glitch {availableMomentaryGlitches.Count} momentary types. Max Events: {(maxGlitchEvents <= 0 ? "Infinite" : maxGlitchEvents.ToString())}");
     }
 
     void ScheduleNextGlitch()
     {
-        timeUntilNextGlitch = Random.Range(minTimeBetweenGlitches, maxTimeBetweenGlitches);
-        isMomentaryGlitchActive = false;
-        activeMomentaryGlitchType = null; // Ensure no glitch type is marked as active
+        // Check window restriction *before* scheduling
+        if (restrictGlitchingToWindow && Time.time > glitchWindowEndTime)
+        {
+            timeUntilNextGlitch = float.MaxValue; // Window closed
+            Debug.Log($"[{gameObject.name}] Glitch window ended at {glitchWindowEndTime:F2}s. No more glitches will be scheduled.", this);
+            return;
+        }
+
+        // Only schedule if we haven't reached the limit (or limit is infinite)
+        if (isSetupComplete && (maxGlitchEvents <= 0 || currentGlitchCount < maxGlitchEvents))
+        {
+            timeUntilNextGlitch = UnityEngine.Random.Range(minTimeBetweenGlitches, maxTimeBetweenGlitches);
+            isMomentaryGlitchActive = false;
+            activeMomentaryGlitchType = null; // Ensure no glitch type is marked as active
+        }
+        else
+        {
+             // Stop scheduling if limit reached
+            timeUntilNextGlitch = float.MaxValue; // Effectively stop timer
+             if(maxGlitchEvents > 0) Debug.Log($"[{gameObject.name}] Max glitch events ({maxGlitchEvents}) reached. No more glitches will be scheduled.");
+        }
     }
 
     void Update()
     {
         if (!isSetupComplete || glitchableRenderers.Count == 0) return;
+
+        // --- Handle Waiting for First Glitch ---
+        if (waitingForFirstGlitch)
+        {
+            if (Time.time >= firstGlitchTime)
+            {
+                waitingForFirstGlitch = false;
+                Debug.Log($"[{gameObject.name}] Reached scheduled first glitch time ({firstGlitchTime:F2}s). Starting glitch sequence.", this);
+                // Check if still within window before triggering immediately
+                if (!restrictGlitchingToWindow || Time.time <= glitchWindowEndTime)
+                {
+                     // Decide whether to trigger immediately or schedule the first one
+                     // Let's trigger immediately for responsiveness after waiting
+                     if (maxGlitchEvents <= 0 || currentGlitchCount < maxGlitchEvents)
+                     {
+                         TriggerGlitchEvent(); // Trigger the first glitch now
+                     } else {
+                         ScheduleNextGlitch(); // Max events already reached? Schedule to stop.
+                     }
+
+                } else {
+                    // We reached the first glitch time but the window already closed
+                    timeUntilNextGlitch = float.MaxValue;
+                     Debug.Log($"[{gameObject.name}] Reached scheduled first glitch time ({firstGlitchTime:F2}s), but glitch window already ended at {glitchWindowEndTime:F2}s.", this);
+                }
+            }
+            else
+            {
+                return; // Still waiting, do nothing else this frame
+            }
+        }
+
+        // --- Check Window End ---
+        // (Done inside ScheduleNextGlitch and before triggering)
+        bool canScheduleNew = !restrictGlitchingToWindow || Time.time <= glitchWindowEndTime;
+
+
+        // Check if we've already reached the max count before proceeding
+        bool canGlitch = maxGlitchEvents <= 0 || currentGlitchCount < maxGlitchEvents;
 
         if (isMomentaryGlitchActive)
         {
@@ -298,10 +491,16 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
             if (Time.time >= currentGlitchEndTime)
             {
                 ResetMomentaryGlitches();
-                ScheduleNextGlitch();
+                // Schedule next only if allowed by count AND window
+                if (canGlitch && canScheduleNew)
+                {
+                   ScheduleNextGlitch();
+                } else {
+                    timeUntilNextGlitch = float.MaxValue; // Ensure timer stays stopped
+                }
             }
         }
-        else
+        else if (canGlitch && canScheduleNew) // Only countdown and trigger if allowed by count AND window
         {
             timeUntilNextGlitch -= Time.deltaTime;
             if (timeUntilNextGlitch <= 0)
@@ -309,39 +508,98 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
                 TriggerGlitchEvent();
             }
         }
+        // If !canGlitch or !canScheduleNew and not currently active, do nothing.
     }
 
     void TriggerGlitchEvent()
     {
-        // --- Decide: Permanent or Momentary? ---
-        if (enablePermanentDisappearance && Random.value < permanentDisappearanceChance)
+        // Double check limits before proceeding (safety)
+        if (maxGlitchEvents > 0 && currentGlitchCount >= maxGlitchEvents)
         {
-            ApplyPermanentDisappearance();
-            if (isSetupComplete) ScheduleNextGlitch();
+            ScheduleNextGlitch(); // This will set timeUntilNextGlitch to MaxValue
+            return;
+        }
+        if (restrictGlitchingToWindow && Time.time > glitchWindowEndTime)
+        {
+            ScheduleNextGlitch(); // This will set timeUntilNextGlitch to MaxValue
+            return;
+        }
+
+        string triggeredGlitchType = "None"; // Local var for decision making
+        float triggeredGlitchDuration = 0f; // Local var for decision making
+        bool glitchTriggered = false;
+        int glitchStartFrame = 0; // Local var for start frame
+        float glitchStartTime = 0f; // Local var for start time
+
+        // --- Decide: Permanent or Momentary? ---
+        if (enablePermanentDisappearance && UnityEngine.Random.value < permanentDisappearanceChance)
+        {
+            glitchStartFrame = Time.frameCount; // Capture start info
+            glitchStartTime = Time.time;
+            ApplyPermanentDisappearance(); // This internally checks isSetupComplete
+            if (isSetupComplete) // Check if disabling occurred within ApplyPermanentDisappearance
+            {
+                 triggeredGlitchType = "PermanentDisappearance";
+                 // Permanent glitches are logged immediately as they have no duration/end time different from start
+                 LogGlitchEvent(triggeredGlitchType, glitchStartFrame, glitchStartTime);
+                 glitchTriggered = true;
+                 currentGlitchCount++; // Increment count here for permanent
+            }
+            else
+            {
+                 glitchTriggered = false; // Don't count or schedule if disabled
+            }
+            // No need to store start info for permanent, it's logged above.
         }
         // --- Decide: Momentary Glitch ---
         else if (availableMomentaryGlitches.Count > 0)
         {
             isMomentaryGlitchActive = true;
+            glitchTriggered = true; // Mark that a momentary glitch is starting
+            currentGlitchCount++; // Increment count for momentary
 
             // --- Reset momentary tracking ---
             renderersInCurrentBlink.Clear();
             transformsInCurrentIndividualJump.Clear();
             activeMomentaryGlitchType = null;
 
+            // --- Capture Start Info for Logging Later ---
+            currentGlitchStartFrame = Time.frameCount;
+            currentGlitchStartTime = Time.time;
+
             // --- Choose ONE momentary glitch type for this event ---
-            int randomIndex = Random.Range(0, availableMomentaryGlitches.Count);
+            int randomIndex = UnityEngine.Random.Range(0, availableMomentaryGlitches.Count);
             activeMomentaryGlitchType = availableMomentaryGlitches[randomIndex];
 
-            // --- Activate the chosen glitch, set its duration, and select targets ---
-            float glitchDuration = 0.1f; // Default safety value
+            // --- Determine Glitch Duration ---
+            float currentMomentaryDuration;
+            if (enforceFixedDuration)
+            {
+                currentMomentaryDuration = fixedGlitchDuration;
+            }
+            else // Use type-specific min/max
+            {
+                if (activeMomentaryGlitchType == typeof(BlinkGlitchState))
+                    currentMomentaryDuration = UnityEngine.Random.Range(minBlinkDuration, maxBlinkDuration);
+                else if (activeMomentaryGlitchType == typeof(IndividualJumpGlitchState))
+                    currentMomentaryDuration = UnityEngine.Random.Range(minIndividualJumpDuration, maxIndividualJumpDuration);
+                else if (activeMomentaryGlitchType == typeof(WholeObjectJumpGlitchState))
+                    currentMomentaryDuration = UnityEngine.Random.Range(minWholeObjectJumpDuration, maxWholeObjectJumpDuration);
+                else if (activeMomentaryGlitchType == typeof(TextureGlitchState))
+                    currentMomentaryDuration = UnityEngine.Random.Range(minTextureGlitchDuration, maxTextureGlitchDuration);
+                else
+                    currentMomentaryDuration = 0.1f; // Safety default if type not matched
+            }
 
+
+            // --- Activate the chosen glitch and select targets ---
             if (activeMomentaryGlitchType == typeof(BlinkGlitchState))
             {
-                glitchDuration = Random.Range(minBlinkDuration, maxBlinkDuration);
+                triggeredGlitchType = "Blink";
+                // Duration already set above
                 foreach (Renderer rend in glitchableRenderers)
                 {
-                    if (rend != null && Random.value < individualGlitchTargetChance)
+                    if (rend != null && UnityEngine.Random.value < individualGlitchTargetChance)
                     {
                         renderersInCurrentBlink.Add(rend);
                     }
@@ -349,11 +607,12 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
             }
             else if (activeMomentaryGlitchType == typeof(IndividualJumpGlitchState))
             {
-                 glitchDuration = Random.Range(minIndividualJumpDuration, maxIndividualJumpDuration);
+                 triggeredGlitchType = "IndividualJump";
+                 // Duration already set above
                 HashSet<Transform> potentialJumpTransforms = new HashSet<Transform>(glitchableRenderers.Where(r => r != null).Select(r => r.transform));
                 foreach (Transform t in potentialJumpTransforms)
                 {
-                    if (t != null && initialLocalPositions.ContainsKey(t) && Random.value < individualGlitchTargetChance)
+                    if (t != null && initialLocalPositions.ContainsKey(t) && UnityEngine.Random.value < individualGlitchTargetChance)
                     {
                         transformsInCurrentIndividualJump.Add(t);
                     }
@@ -361,21 +620,46 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
             }
             else if (activeMomentaryGlitchType == typeof(WholeObjectJumpGlitchState))
             {
-                 glitchDuration = Random.Range(minWholeObjectJumpDuration, maxWholeObjectJumpDuration);
+                 triggeredGlitchType = "WholeObjectJump";
+                 // Duration already set above
                 // No specific targets needed, affects root
             }
             else if (activeMomentaryGlitchType == typeof(TextureGlitchState))
             {
-                 glitchDuration = Random.Range(minTextureGlitchDuration, maxTextureGlitchDuration);
+                 triggeredGlitchType = $"Texture ({textureGlitchMode})";
+                 // Duration already set above
                 ApplyTextureGlitchStart(); // Apply texture change ONCE at the start
             }
+             else
+            {
+                 // Safety net if somehow the chosen type wasn't handled above
+                 triggeredGlitchType = "UnknownMomentary";
+            }
 
-             currentGlitchEndTime = Time.time + glitchDuration; // Set end time based on chosen type
+             // --- Store Start Info For Logging ---
+             currentGlitchLogType = triggeredGlitchType; // Store type for logging
+             currentGlitchDurationSec = currentMomentaryDuration; // Store duration for logging
+             currentGlitchScheduledEndTime = currentGlitchStartTime + currentMomentaryDuration; // Store calculated end time for logging
+
+             // Set the actual end time for the Update loop check
+             currentGlitchEndTime = currentGlitchScheduledEndTime;
+
              ApplyMomentaryGlitchesPerFrame(); // Apply the first frame effect immediately
         }
         else
         {
-             ScheduleNextGlitch(); // No momentary glitches enabled
+             glitchTriggered = false;
+             // Don't schedule here, let the main loop handle scheduling if no glitch occurred
+        }
+
+        // --- Schedule the next glitch IF one was triggered and we are still active ---
+        if (glitchTriggered && isSetupComplete)
+        {
+            ScheduleNextGlitch(); // Schedule the *next* one (if allowed by counter)
+        }
+        else if (!isMomentaryGlitchActive) // If no glitch triggered and not already in one
+        {
+             ScheduleNextGlitch(); // Schedule anyway to keep trying
         }
     }
 
@@ -387,7 +671,7 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         {
             foreach (Renderer rend in renderersInCurrentBlink)
             {
-                if (rend != null) rend.enabled = (Random.value <= blinkVisibilityChanceDuringGlitch);
+                if (rend != null) rend.enabled = (UnityEngine.Random.value <= blinkVisibilityChanceDuringGlitch);
             }
         }
 
@@ -401,11 +685,11 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
                 {
                     Vector3 initialPos = initialLocalPositions[t];
                     Quaternion initialRot = initialLocalRotations[t];
-                    t.localPosition = initialPos + Random.insideUnitSphere * individualJumpPositionIntensity;
+                    t.localPosition = initialPos + UnityEngine.Random.insideUnitSphere * individualJumpPositionIntensity;
                     t.localRotation = initialRot * Quaternion.Euler(
-                        Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity),
-                        Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity),
-                        Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity)
+                        UnityEngine.Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity),
+                        UnityEngine.Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity),
+                        UnityEngine.Random.Range(-individualJumpRotationIntensity, individualJumpRotationIntensity)
                     );
                 }
             }
@@ -414,11 +698,11 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         // --- Apply Whole Object Jump (Once at start) ---
         if (activeMomentaryGlitchType == typeof(WholeObjectJumpGlitchState) && targetRoot != null)
         {
-            targetRoot.localPosition = initialRootLocalPosition + Random.insideUnitSphere * wholeObjectJumpPositionIntensity;
+            targetRoot.localPosition = initialRootLocalPosition + UnityEngine.Random.insideUnitSphere * wholeObjectJumpPositionIntensity;
             targetRoot.localRotation = initialRootLocalRotation * Quaternion.Euler(
-                Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity),
-                Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity),
-                Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity)
+                UnityEngine.Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity),
+                UnityEngine.Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity),
+                UnityEngine.Random.Range(-wholeObjectJumpRotationIntensity, wholeObjectJumpRotationIntensity)
             );
         }
 
@@ -510,6 +794,17 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
     {
         if (!isSetupComplete || activeMomentaryGlitchType == null) return; // Nothing to reset if no glitch was active
 
+        // --- Log the completed momentary glitch ---
+        int endFrame = Time.frameCount;
+        LogGlitchEvent(
+            currentGlitchLogType,
+            currentGlitchStartFrame,
+            currentGlitchStartTime,
+            currentGlitchDurationSec,
+            currentGlitchScheduledEndTime, // Use the originally calculated end time for consistency
+            endFrame
+        );
+
         // --- Reset Blinking Renderers ---
         if (activeMomentaryGlitchType == typeof(BlinkGlitchState))
         {
@@ -596,6 +891,13 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         activeMomentaryGlitchType = null;
         renderersInCurrentBlink.Clear();
         transformsInCurrentIndividualJump.Clear();
+
+        // Clear stored log info
+        currentGlitchLogType = "None";
+        currentGlitchStartFrame = 0;
+        currentGlitchStartTime = 0f;
+        currentGlitchDurationSec = 0f;
+        currentGlitchScheduledEndTime = 0f;
     }
 
 
@@ -608,7 +910,7 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
 
         foreach (Renderer rend in glitchableRenderers)
         {
-            if (rend != null && Random.value < disappearanceTargetChance)
+            if (rend != null && UnityEngine.Random.value < disappearanceTargetChance)
             {
                 renderersToRemove.Add(rend);
                 if (!transformsToCheckForRemoval.Contains(rend.transform)) transformsToCheckForRemoval.Add(rend.transform);
@@ -652,6 +954,55 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         }
     }
 
+    // --- Logging Methods ---
+
+    // Overload for momentary glitches
+    void LogGlitchEvent(string type, int startFrame, float startTime, float durationSec, float endTime, int endFrame)
+    {
+        if (!enableLogging || string.IsNullOrEmpty(type) || type == "None") return;
+
+        GlitchLogEntry entry = new GlitchLogEntry(type, startFrame, startTime, durationSec, endTime, endFrame);
+        glitchLog.entries.Add(entry);
+        // Debug.Log($"Logged Glitch: {type}, Frame: {startFrame}-{endFrame} ({entry.durationFrames}f), Start: {startTime:F3}, Duration: {durationSec:F3}, End: {endTime:F3}s");
+    }
+
+    // Overload for permanent glitches (simpler)
+    void LogGlitchEvent(string type, int frame, float time)
+    {
+        if (!enableLogging || string.IsNullOrEmpty(type) || type == "None") return;
+
+        GlitchLogEntry entry = new GlitchLogEntry(type, frame, time);
+        glitchLog.entries.Add(entry);
+        // Debug.Log($"Logged Glitch: {type}, Frame: {frame}, Time: {time:F3}");
+    }
+
+    void WriteLogToFile()
+    {
+         if (!enableLogging || logWritten || glitchLog.entries.Count == 0) return;
+
+        try
+        {
+            string dirPath = Path.Combine(Application.persistentDataPath, logDirectory);
+            Directory.CreateDirectory(dirPath); // Ensure directory exists
+
+            // Sanitize GameObject name for filename
+            string safeGameObjectName = string.Join("_", gameObject.name.Split(Path.GetInvalidFileNameChars()));
+
+            string fileName = $"glitch_log_{safeGameObjectName}_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+            string filePath = Path.Combine(dirPath, fileName);
+
+            // GlitchLogData now contains the window info, so just serialize it
+            string jsonLog = JsonUtility.ToJson(glitchLog, true); // Use the wrapper class
+            File.WriteAllText(filePath, jsonLog);
+
+            Debug.Log($"Glitch log saved to: {filePath}");
+            logWritten = true; // Mark as written for this session/enable cycle
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[{gameObject.name}] Failed to write glitch log: {e.Message}\nStackTrace: {e.StackTrace}", this);
+        }
+    }
 
     void OnDisable()
     {
@@ -659,5 +1010,13 @@ public class AdvancedHierarchicalGlitch : MonoBehaviour
         {
             ResetMomentaryGlitches(); // Ensure any active temporary effect is reset
         }
+        // Write log when disabled, if enabled and not already written
+        WriteLogToFile();
+    }
+
+    void OnDestroy()
+    {
+        // Attempt to write log on destroy as well, in case OnDisable didn't fire or wasn't enough
+        WriteLogToFile();
     }
 }
